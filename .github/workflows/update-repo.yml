@@ -1,0 +1,98 @@
+name: Update APT Repository
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "packages.list"
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      need_update: ${{ steps.check.outputs.NEED_UPDATE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Package Changes
+        id: check
+        run: |
+          chmod +x ./scripts/check-package-diff.sh
+          ./scripts/check-package-diff.sh
+
+      - name: Upload Manifest
+        uses: actions/upload-artifact@v4
+        if: steps.check.outputs.NEED_UPDATE == 'true'
+        with:
+          name: package-manifest
+          path: ${{ github.workspace }}/.package-manifest
+          include-hidden-files: true
+
+  build-repo:
+    needs: check-changes
+    if: needs.check-changes.outputs.need_update == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y reprepro gnupg wget
+
+      - name: Download Manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: package-manifest
+
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Fetch Packages
+        run: |
+          mkdir -p downloaded_packages
+          ./scripts/fetch-packages.sh
+
+      - name: Build Repo
+        run: |
+          ./scripts/setup-reprepro.sh
+
+      - name: Generate Directory Listings
+        uses: jayanta525/github-pages-directory-listing@v4.0.0
+        with:
+          FOLDER: ./gh-pages
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3.0.1
+        with:
+          path: "./gh-pages"
+
+      - name: Commit Manifest
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add .package-manifest
+          git commit -m "Update package manifest" || echo "No changes to commit"
+          git push
+
+  deploy-index:
+    needs: build-repo
+    if: always() && needs.build-repo.result == 'success'
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4.0.0
